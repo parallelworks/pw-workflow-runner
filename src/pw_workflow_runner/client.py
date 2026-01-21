@@ -85,16 +85,35 @@ class PWClient:
     def get_run_status(self, workflow_name: str, run_number: int) -> RunInfo:
         """Get the status of a workflow run.
 
+        WARNING: This endpoint (GET /api/workflows/{workflow}/runs/{runNumber})
+        is not supported by the Parallel Works API - it returns 405 Method Not Allowed.
+
+        For session workflows, use get_session_for_run() instead which queries
+        the /api/sessions endpoint.
+
         Args:
             workflow_name: Name of the workflow.
             run_number: Run number to check.
 
         Returns:
             RunInfo with current run status.
+
+        Raises:
+            httpx.HTTPStatusError: Always raises 405 Method Not Allowed.
         """
         response = self._sync_client.get(f"/api/workflows/{workflow_name}/runs/{run_number}")
         response.raise_for_status()
         return RunInfo.model_validate(response.json())
+
+    def cancel_run(self, workflow_name: str, run_number: int) -> None:
+        """Cancel/delete a workflow run.
+
+        Args:
+            workflow_name: Name of the workflow.
+            run_number: Run number to cancel.
+        """
+        response = self._sync_client.delete(f"/api/workflows/{workflow_name}/runs/{run_number}")
+        response.raise_for_status()
 
     def get_sessions(self) -> list[SessionInfo]:
         """Get all active sessions.
@@ -108,23 +127,31 @@ class PWClient:
         return [SessionInfo.model_validate(s) for s in data]
 
     def get_session_for_run(
-        self, workflow_name: str, run_number: int
+        self, workflow_name: str, run_number: int, debug: bool = False
     ) -> Optional[SessionInfo]:
         """Find the session associated with a workflow run.
 
         Args:
             workflow_name: Name of the workflow.
             run_number: Run number to find session for.
+            debug: If True, print debug info about sessions.
 
         Returns:
             SessionInfo if found, None otherwise.
         """
         sessions = self.get_sessions()
+        if debug:
+            print(f"Looking for workflow={workflow_name}, run={run_number}")
+            print(f"Found {len(sessions)} sessions")
         for session in sessions:
-            if (
-                session.workflow_run
-                and session.workflow_run.workflow_name == workflow_name
-                and session.workflow_run.number == run_number
-            ):
-                return session
+            if debug:
+                print(f"  Session {session.id}: workflow_run={session.workflow_run}")
+            if session.workflow_run and session.workflow_run.number == run_number:
+                # Match on run number. If workflow_name is available, verify it matches.
+                # The API sometimes returns workflow_name as None.
+                if (
+                    session.workflow_run.workflow_name is None
+                    or session.workflow_run.workflow_name == workflow_name
+                ):
+                    return session
         return None
