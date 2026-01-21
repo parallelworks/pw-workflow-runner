@@ -12,7 +12,7 @@ from rich.table import Table
 
 from .client import PWClient, PWClientError
 from .executor import ExecutionResult, ExecutionTimeout, WorkflowExecutor
-from .models import RunInfo
+from .models import RunInfo, WorkflowType
 
 # Load .env file if present
 load_dotenv()
@@ -95,6 +95,13 @@ def list_workflows(as_json: bool):
 @click.argument("workflow_name")
 @click.option("--input", "-i", "input_file", type=click.Path(exists=True), help="JSON input file")
 @click.option("--param", "-p", "params", multiple=True, help="Input parameter as key=value")
+@click.option(
+    "--type",
+    "workflow_type",
+    type=click.Choice(["batch", "session"], case_sensitive=False),
+    default="batch",
+    help="Workflow type: batch (runs to completion) or session (interactive, stays running)",
+)
 @click.option("--timeout", "-t", type=float, default=3600, help="Timeout in seconds (default: 3600)")
 @click.option("--no-wait", is_flag=True, help="Submit and exit without waiting for completion")
 @click.option("--json", "as_json", is_flag=True, help="Output result as JSON")
@@ -102,6 +109,7 @@ def run_workflow(
     workflow_name: str,
     input_file: Optional[str],
     params: tuple,
+    workflow_type: str,
     timeout: float,
     no_wait: bool,
     as_json: bool,
@@ -110,9 +118,11 @@ def run_workflow(
 
     Examples:
 
-        pw-workflow-runner run hello-world --input inputs/hello-world.json
+        # Batch workflow (runs to completion)
+        pw-workflow-runner run my-batch-job --input inputs/job.json
 
-        pw-workflow-runner run hello-world -p "hello.message=test"
+        # Interactive session workflow (stays running)
+        pw-workflow-runner run helloworld --input inputs/helloworld.json --type session
     """
     # Build inputs
     inputs = {}
@@ -142,16 +152,21 @@ def run_workflow(
         print_error("No inputs provided. Use --input FILE or -p key=value")
         sys.exit(1)
 
+    # Convert workflow type string to enum
+    wf_type = WorkflowType.SESSION if workflow_type.lower() == "session" else WorkflowType.BATCH
+
     try:
         with PWClient() as client:
             executor = WorkflowExecutor(client, timeout=timeout)
 
             if not as_json:
-                console.print(f"Submitting workflow: [cyan]{workflow_name}[/cyan]")
+                type_label = "session" if wf_type == WorkflowType.SESSION else "batch"
+                console.print(f"Submitting {type_label} workflow: [cyan]{workflow_name}[/cyan]")
 
             result = executor.execute(
                 workflow_name=workflow_name,
                 inputs=inputs,
+                workflow_type=wf_type,
                 on_status=None if as_json else print_status_update,
                 wait=not no_wait,
             )
@@ -219,17 +234,24 @@ def _print_result(result: ExecutionResult, as_json: bool):
             "workflow_name": result.workflow_name,
             "run_number": result.run_number,
             "status": result.status,
+            "workflow_type": result.workflow_type.value,
             "started_at": result.started_at.isoformat(),
             "completed_at": result.completed_at.isoformat() if result.completed_at else None,
             "duration_seconds": result.duration_seconds,
             "success": result.success,
+            "session_url": result.session_url,
         }
         click.echo(json.dumps(data, indent=2))
         return
 
     console.print()
     if result.success:
-        print_success(f"Workflow completed successfully")
+        if result.workflow_type == WorkflowType.SESSION:
+            print_success("Session is ready!")
+            if result.session_url:
+                console.print(f"  Session URL: [link={result.session_url}]{result.session_url}[/link]")
+        else:
+            print_success("Workflow completed successfully")
     else:
         print_error(f"Workflow {result.status}")
 
