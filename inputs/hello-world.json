@@ -1,0 +1,36 @@
+{
+  "v3": true,
+  "workflow_dir": "",
+  "submit_to_scheduler": true,
+  "slurm": {
+    "v3": true,
+    "is_disabled": true,
+    "cpus_per_task": 1,
+    "time": "",
+    "gres": "",
+    "account": "",
+    "partition": "batch",
+    "qos": ""
+  },
+  "pbs": {
+    "v3": true,
+    "is_disabled": true,
+    "walltime": "",
+    "select": ""
+  },
+  "hello": {
+    "v3": true,
+    "message": ""
+  },
+  "resource": {
+    "id": "6894b3f8d9dedd97d7c3d536",
+    "type": "existing",
+    "provider": "existing",
+    "ip": "gpu.parallel.works",
+    "user": "Matthew.Shaxted",
+    "namespace": "Matthew.Shaxted",
+    "name": "a30gpuserver",
+    "tags": null,
+    "schedulerType": ""
+  }
+}
