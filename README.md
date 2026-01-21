@@ -10,6 +10,7 @@ A command-line tool for executing workflows on the Parallel Works ACTIVATE platf
   - **Batch** - runs to completion, ends in "completed" state
   - **Session** - interactive sessions that stay "running" and provide a session URL
 - **Monitor execution** with live status updates and exponential backoff polling
+- **SSH tunneling** - connect to session workflows from your local machine via the `pw` CLI
 - **Interactive mode** - guided workflow selection and execution when run without arguments
 
 ## Installation
@@ -98,6 +99,22 @@ pw-workflow-runner run helloworld --input inputs/helloworld.json --timeout 600 -
 # Output as JSON
 pw-workflow-runner run helloworld --input inputs/helloworld.json --json --type session
 ```
+
+### SSH Tunnel for Session Workflows
+
+For session workflows, you can create an SSH tunnel to access the session directly from your local machine without using the PW web interface. This requires the [pw CLI](https://parallelworks.com/docs/cli/pw) to be installed.
+
+The session port is automatically detected from the PW sessions API.
+
+```bash
+# Start session with SSH tunnel (port auto-detected from session)
+pw-workflow-runner run helloworld --input inputs/helloworld.json --type session --tunnel
+
+# Override local port if the auto-detected port is already in use
+pw-workflow-runner run helloworld --input inputs/helloworld.json --type session --tunnel --local-port 9000
+```
+
+When the session is ready, the tunnel will be established and you can access it at `http://localhost:<port>`. Press `Ctrl+C` to close the tunnel and exit.
 
 ### Check Run Status
 

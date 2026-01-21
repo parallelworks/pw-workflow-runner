@@ -57,3 +57,36 @@ class SubmitResponse(BaseModel):
 
     run: RunInfo
     redirect: Optional[str] = None
+
+
+class SessionWorkflowRun(BaseModel):
+    """Workflow run info embedded in session response."""
+
+    id: Optional[str] = None
+    number: Optional[int] = None
+    workflow_name: Optional[str] = Field(None, alias="workflowName")
+
+    class Config:
+        populate_by_name = True
+
+
+class SessionInfo(BaseModel):
+    """Session info from GET /api/sessions."""
+
+    id: str
+    name: Optional[str] = None
+    slug: Optional[str] = None
+    status: Optional[str] = None
+    type: Optional[str] = None
+    local_port: Optional[int] = Field(None, alias="localPort")
+    remote_port: Optional[int] = Field(None, alias="remotePort")
+    remote_host: Optional[str] = Field(None, alias="remoteHost")
+    url: Optional[str] = None
+    external_href: Optional[str] = Field(None, alias="externalHref")
+    internal_href: Optional[str] = Field(None, alias="internalHref")
+    domain_name: Optional[str] = Field(None, alias="domainName")
+    user: Optional[str] = None
+    workflow_run: Optional[SessionWorkflowRun] = Field(None, alias="workflowRun")
+
+    class Config:
+        populate_by_name = True

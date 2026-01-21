@@ -1,6 +1,10 @@
 """CLI commands for PW Workflow Runner."""
 
 import json
+import os
+import shutil
+import signal
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
@@ -18,6 +22,45 @@ from .models import RunInfo, WorkflowType
 load_dotenv()
 
 console = Console()
+
+
+def _start_ssh_tunnel(
+    user: str,
+    local_port: int,
+    remote_port: int,
+) -> subprocess.Popen:
+    """Start an SSH tunnel to the workspace using the pw CLI.
+
+    Args:
+        user: PW username for SSH connection.
+        local_port: Local port to forward.
+        remote_port: Remote port on the workspace.
+
+    Returns:
+        Popen process for the SSH tunnel.
+    """
+    # Check if pw CLI is available
+    if not shutil.which("pw"):
+        raise RuntimeError(
+            "pw CLI not found. Install it from https://parallelworks.com/docs/cli/pw"
+        )
+
+    cmd = [
+        "ssh",
+        "-L", f"{local_port}:localhost:{remote_port}",
+        "-o", "ProxyCommand=pw ssh --proxy-command %h",
+        "-N",  # Don't execute remote command
+        f"{user}@workspace",
+    ]
+
+    # Start tunnel in background
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    return process
 
 
 def print_error(message: str):
@@ -105,6 +148,17 @@ def list_workflows(as_json: bool):
 @click.option("--timeout", "-t", type=float, default=3600, help="Timeout in seconds (default: 3600)")
 @click.option("--no-wait", is_flag=True, help="Submit and exit without waiting for completion")
 @click.option("--json", "as_json", is_flag=True, help="Output result as JSON")
+@click.option(
+    "--tunnel",
+    is_flag=True,
+    help="Create SSH tunnel to session (requires pw CLI). Only for session workflows.",
+)
+@click.option(
+    "--local-port",
+    type=int,
+    default=None,
+    help="Local port for SSH tunnel (default: auto-detect from session)",
+)
 def run_workflow(
     workflow_name: str,
     input_file: Optional[str],
@@ -113,6 +167,8 @@ def run_workflow(
     timeout: float,
     no_wait: bool,
     as_json: bool,
+    tunnel: bool,
+    local_port: Optional[int],
 ):
     """Run a workflow with inputs.
 
@@ -123,6 +179,9 @@ def run_workflow(
 
         # Interactive session workflow (stays running)
         pw-workflow-runner run helloworld --input inputs/helloworld.json --type session
+
+        # Session with SSH tunnel for local access
+        pw-workflow-runner run helloworld --input inputs/helloworld.json --type session --tunnel
     """
     # Build inputs
     inputs = {}
@@ -155,6 +214,14 @@ def run_workflow(
     # Convert workflow type string to enum
     wf_type = WorkflowType.SESSION if workflow_type.lower() == "session" else WorkflowType.BATCH
 
+    # Tunnel only makes sense for session workflows
+    if tunnel and wf_type != WorkflowType.SESSION:
+        print_error("--tunnel can only be used with --type session")
+        sys.exit(1)
+
+    # Get username from inputs for tunnel
+    user = inputs.get("resource", {}).get("user", os.environ.get("USER", ""))
+
     try:
         with PWClient() as client:
             executor = WorkflowExecutor(client, timeout=timeout)
@@ -171,7 +238,24 @@ def run_workflow(
                 wait=not no_wait,
             )
 
-            _print_result(result, as_json)
+            # For session workflows with tunnel, get the session port
+            session_port = None
+            if tunnel and result.success and wf_type == WorkflowType.SESSION:
+                session_info = client.get_session_for_run(workflow_name, result.run_number)
+                if session_info and session_info.local_port:
+                    session_port = session_info.local_port
+                else:
+                    print_error("Could not detect session port. Session may not be ready yet.")
+                    sys.exit(1)
+
+            # Use user-specified port or auto-detected session port
+            tunnel_port = local_port if local_port is not None else session_port
+
+            _print_result(result, as_json, tunnel, tunnel_port)
+
+            # Start tunnel if requested and session is ready
+            if tunnel and result.success and wf_type == WorkflowType.SESSION and session_port:
+                _run_tunnel(user, tunnel_port, session_port)
 
             sys.exit(0 if result.success else 1)
 
@@ -227,7 +311,12 @@ def _set_nested(d: dict, keys: list[str], value):
     d[keys[-1]] = value
 
 
-def _print_result(result: ExecutionResult, as_json: bool):
+def _print_result(
+    result: ExecutionResult,
+    as_json: bool,
+    tunnel: bool = False,
+    local_port: Optional[int] = None,
+):
     """Print execution result."""
     if as_json:
         data = {
@@ -241,6 +330,8 @@ def _print_result(result: ExecutionResult, as_json: bool):
             "success": result.success,
             "session_url": result.session_url,
         }
+        if tunnel and result.success and local_port:
+            data["local_url"] = f"http://localhost:{local_port}"
         click.echo(json.dumps(data, indent=2))
         return
 
@@ -250,6 +341,8 @@ def _print_result(result: ExecutionResult, as_json: bool):
             print_success("Session is ready!")
             if result.session_url:
                 console.print(f"  Session URL: [link={result.session_url}]{result.session_url}[/link]")
+            if tunnel and local_port:
+                console.print(f"  Local URL: [link=http://localhost:{local_port}]http://localhost:{local_port}[/link]")
         else:
             print_success("Workflow completed successfully")
     else:
@@ -258,6 +351,55 @@ def _print_result(result: ExecutionResult, as_json: bool):
     console.print(f"  Run: #{result.run_number}")
     if result.duration_seconds:
         console.print(f"  Duration: {result.duration_seconds:.1f}s")
+
+
+def _run_tunnel(user: str, local_port: int, remote_port: int):
+    """Run SSH tunnel and wait for user interrupt.
+
+    Args:
+        user: PW username for SSH connection.
+        local_port: Local port to forward.
+        remote_port: Remote port on the workspace.
+    """
+    console.print()
+    console.print("[cyan]Starting SSH tunnel...[/cyan]")
+    console.print(f"  Forwarding localhost:{local_port} -> workspace:{remote_port}")
+    console.print()
+
+    try:
+        tunnel_process = _start_ssh_tunnel(user, local_port, remote_port)
+
+        # Give it a moment to connect
+        import time
+        time.sleep(2)
+
+        # Check if tunnel started successfully
+        if tunnel_process.poll() is not None:
+            # Process already exited - there was an error
+            _, stderr = tunnel_process.communicate()
+            print_error(f"SSH tunnel failed to start: {stderr.decode().strip()}")
+            return
+
+        console.print("[green]Tunnel established![/green]")
+        console.print(f"  Access your session at: [link=http://localhost:{local_port}]http://localhost:{local_port}[/link]")
+        console.print()
+        console.print("[dim]Press Ctrl+C to close the tunnel and exit[/dim]")
+
+        # Wait for the tunnel process or user interrupt
+        def handle_sigint(signum, frame):
+            console.print("\n[yellow]Closing tunnel...[/yellow]")
+            tunnel_process.terminate()
+            tunnel_process.wait()
+            console.print("[green]Tunnel closed.[/green]")
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, handle_sigint)
+
+        # Keep the main process alive while tunnel runs
+        tunnel_process.wait()
+
+    except RuntimeError as e:
+        print_error(str(e))
 
 
 if __name__ == "__main__":
