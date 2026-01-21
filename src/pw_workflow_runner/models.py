@@ -1,9 +1,17 @@
 """Pydantic models for PW API responses."""
 
 from datetime import datetime
+from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
+
+
+class WorkflowType(str, Enum):
+    """Type of workflow execution."""
+
+    BATCH = "batch"  # Runs to completion, ends in "completed" state
+    SESSION = "session"  # Interactive session, stays in "running" state with session URL
 
 
 class WorkflowInfo(BaseModel):

@@ -63,7 +63,7 @@ class PWClient:
         response.raise_for_status()
         return WorkflowInfo.model_validate(response.json())
 
-    def submit_workflow(self, workflow_name: str, inputs: dict) -> RunInfo:
+    def submit_workflow(self, workflow_name: str, inputs: dict) -> tuple[RunInfo, Optional[str]]:
         """Submit a workflow run.
 
         Args:
@@ -71,7 +71,8 @@ class PWClient:
             inputs: Input parameters for the workflow.
 
         Returns:
-            RunInfo with the submitted run details.
+            Tuple of (RunInfo, redirect_url). redirect_url is the session URL for
+            interactive session workflows, or None for batch workflows.
         """
         response = self._sync_client.post(
             f"/api/workflows/{workflow_name}/runs",
@@ -79,7 +80,7 @@ class PWClient:
         )
         response.raise_for_status()
         submit_response = SubmitResponse.model_validate(response.json())
-        return submit_response.run
+        return submit_response.run, submit_response.redirect
 
     def get_run_status(self, workflow_name: str, run_number: int) -> RunInfo:
         """Get the status of a workflow run.

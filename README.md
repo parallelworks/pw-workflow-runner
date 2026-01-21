@@ -6,6 +6,9 @@ A command-line tool for executing workflows on the Parallel Works ACTIVATE platf
 
 - **List workflows** available in your PW account
 - **Execute workflows** with JSON input payloads
+- **Two workflow types**:
+  - **Batch** - runs to completion, ends in "completed" state
+  - **Session** - interactive sessions that stay "running" and provide a session URL
 - **Monitor execution** with live status updates and exponential backoff polling
 - **Interactive mode** - guided workflow selection and execution when run without arguments
 
@@ -68,38 +71,46 @@ pw-workflow-runner list --json
 
 ### Run a Workflow
 
+Two workflow types are supported:
+
+- **batch** (default) - Waits for workflow to complete with "completed" status
+- **session** - Interactive sessions that stay "running" and provide a session URL
+
 ```bash
-# With JSON input file
-pw-workflow-runner run hello-world --input inputs/hello-world.json
+# Batch workflow (default) - runs to completion
+pw-workflow-runner run my-batch-job --input inputs/job.json
+
+# Interactive session workflow - stays running with session URL
+pw-workflow-runner run helloworld --input inputs/helloworld.json --type session
 
 # With inline parameters
-pw-workflow-runner run hello-world -p "hello.message=test"
+pw-workflow-runner run helloworld -p "hello.message=test" --type session
 
 # Combine file and overrides
-pw-workflow-runner run hello-world --input inputs/hello-world.json -p "hello.message=override"
+pw-workflow-runner run helloworld --input inputs/helloworld.json -p "hello.message=override" --type session
 
 # Submit without waiting for completion
-pw-workflow-runner run hello-world --input inputs/hello-world.json --no-wait
+pw-workflow-runner run helloworld --input inputs/helloworld.json --no-wait
 
 # Custom timeout (default: 3600s)
-pw-workflow-runner run hello-world --input inputs/hello-world.json --timeout 600
+pw-workflow-runner run helloworld --input inputs/helloworld.json --timeout 600 --type session
 
 # Output as JSON
-pw-workflow-runner run hello-world --input inputs/hello-world.json --json
+pw-workflow-runner run helloworld --input inputs/helloworld.json --json --type session
 ```
 
 ### Check Run Status
 
 ```bash
-pw-workflow-runner status hello-world 42
-pw-workflow-runner status hello-world 42 --json
+pw-workflow-runner status helloworld 42
+pw-workflow-runner status helloworld 42 --json
 ```
 
 ## Input Files
 
 Input files are JSON payloads matching the workflow's expected parameters. These can be exported directly from the PW platform.
 
-Example `inputs/hello-world.json`:
+Example `inputs/helloworld.json` (interactive session workflow):
 
 ```json
 {
@@ -141,7 +152,7 @@ pw-workflow-runner/
 │       ├── interactive.py      # Interactive mode
 │       └── cli.py              # CLI commands
 └── inputs/
-    └── hello-world.json        # Example input
+    └── helloworld.json         # Example input for session workflow
 ```
 
 ## Development
