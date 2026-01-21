@@ -133,7 +133,7 @@ Example `inputs/helloworld.json` (interactive session workflow):
 {
   "v3": true,
   "workflow_dir": "",
-  "submit_to_scheduler": true,
+  "submit_to_scheduler": false,
   "slurm": {
     "v3": true,
     "is_disabled": true,

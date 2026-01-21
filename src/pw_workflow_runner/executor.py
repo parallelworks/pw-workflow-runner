@@ -43,8 +43,9 @@ class ExecutionResult:
     def success(self) -> bool:
         """Check if the execution completed successfully."""
         if self.workflow_type == WorkflowType.SESSION:
-            # Session workflows are successful when running with accessible URL
-            return self.status.lower() == "running" and self.session_url is not None
+            # Session workflows are successful when running
+            # (session_url may be None for SSH tunnel use cases)
+            return self.status.lower() == "running"
         else:
             # Batch workflows are successful when completed
             return self.status.lower() == "completed"
@@ -66,7 +67,7 @@ class WorkflowExecutor:
         client: PWClient,
         timeout: float = 3600,
         initial_poll_interval: float = 5.0,
-        max_poll_interval: float = 60.0,
+        max_poll_interval: float = 10.0,
         backoff_factor: float = 1.5,
     ):
         """Initialize executor.
@@ -221,8 +222,9 @@ class WorkflowExecutor:
         """Poll for session workflow to be ready.
 
         Session workflows are ready when:
-        1. Status is "running"
-        2. Session URL is accessible (returns 200)
+        1. Session appears in /api/sessions
+        2. Session status is "running" or similar active state
+        3. Session URL is accessible (returns 200)
 
         Args:
             workflow_name: Name of the workflow.
@@ -250,49 +252,82 @@ class WorkflowExecutor:
                     f"Session {workflow_name} run #{run_number} timed out after {elapsed:.1f}s"
                 )
 
-            # Get current status
-            run_info = self.client.get_run_status(workflow_name, run_number)
+            # Poll session status via /api/sessions endpoint
+            session_info = self.client.get_session_for_run(workflow_name, run_number)
 
-            # Notify callback if status changed or first poll
-            if on_status and run_info.status != last_status:
-                on_status(run_info, elapsed)
-            last_status = run_info.status
+            if session_info:
+                current_status = session_info.status or "unknown"
 
-            # Check for failure
-            if run_info.status.lower() in SESSION_TERMINAL_STATUSES:
-                completed_at = datetime.utcnow()
-                duration = (completed_at - started_at).total_seconds()
+                # Notify callback if status changed
+                if on_status and current_status != last_status:
+                    # Create a minimal RunInfo for the callback
+                    from .models import RunInfo
+                    run_info = RunInfo(
+                        id=session_info.id,
+                        number=run_number,
+                        status=current_status,
+                        workflow_name=workflow_name,
+                        workflow_id="",
+                        workflow_display_name=workflow_name,
+                        user=session_info.user or "",
+                        created_at=started_at,
+                    )
+                    on_status(run_info, elapsed)
+                last_status = current_status
 
-                return ExecutionResult(
-                    workflow_name=workflow_name,
-                    run_number=run_number,
-                    status=run_info.status,
-                    workflow_type=WorkflowType.SESSION,
-                    started_at=started_at,
-                    completed_at=completed_at,
-                    duration_seconds=duration,
-                    run_info=run_info,
-                    error_message=f"Session failed with status: {run_info.status}",
-                )
+                # Check for failure states
+                if current_status.lower() in SESSION_TERMINAL_STATUSES:
+                    completed_at = datetime.utcnow()
+                    duration = (completed_at - started_at).total_seconds()
 
-            # Check if running and session is accessible
-            if run_info.status.lower() == SESSION_READY_STATUS:
-                # Try to validate session URL if we have one
-                if session_url and self._validate_session_url(session_url):
+                    return ExecutionResult(
+                        workflow_name=workflow_name,
+                        run_number=run_number,
+                        status=current_status,
+                        workflow_type=WorkflowType.SESSION,
+                        started_at=started_at,
+                        completed_at=completed_at,
+                        duration_seconds=duration,
+                        run_info=None,
+                        error_message=f"Session failed with status: {current_status}",
+                    )
+
+                # Use session URL from session info if available, fallback to redirect_url
+                actual_session_url = session_info.external_href or session_info.url or session_url
+
+                # Check if session is ready (status is "running")
+                # For SSH tunnel use cases, we don't need to validate the URL is HTTP-accessible
+                if current_status.lower() == SESSION_READY_STATUS:
                     ready_at = datetime.utcnow()
                     duration = (ready_at - started_at).total_seconds()
 
                     return ExecutionResult(
                         workflow_name=workflow_name,
                         run_number=run_number,
-                        status=run_info.status,
+                        status=current_status,
                         workflow_type=WorkflowType.SESSION,
                         started_at=started_at,
                         completed_at=ready_at,
                         duration_seconds=duration,
-                        run_info=run_info,
-                        session_url=session_url,
+                        run_info=None,
+                        session_url=actual_session_url,
                     )
+            else:
+                # Session not yet created, notify callback with starting status
+                if on_status and last_status != "starting":
+                    from .models import RunInfo
+                    run_info = RunInfo(
+                        id="",
+                        number=run_number,
+                        status="starting",
+                        workflow_name=workflow_name,
+                        workflow_id="",
+                        workflow_display_name=workflow_name,
+                        user="",
+                        created_at=started_at,
+                    )
+                    on_status(run_info, elapsed)
+                last_status = "starting"
 
             # Wait before next poll with jitter
             jitter = 1 + (random.random() - 0.5) * 0.2

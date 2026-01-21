@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
+from parallelworks_client import extract_platform_host
+
 from .client import PWClient, PWClientError
 from .executor import ExecutionResult, ExecutionTimeout, WorkflowExecutor
 from .models import RunInfo, WorkflowType
@@ -28,6 +30,7 @@ def _start_ssh_tunnel(
     user: str,
     local_port: int,
     remote_port: int,
+    debug: bool = False,
 ) -> subprocess.Popen:
     """Start an SSH tunnel to the workspace using the pw CLI.
 
@@ -35,6 +38,7 @@ def _start_ssh_tunnel(
         user: PW username for SSH connection.
         local_port: Local port to forward.
         remote_port: Remote port on the workspace.
+        debug: If True, print the SSH command being run.
 
     Returns:
         Popen process for the SSH tunnel.
@@ -45,19 +49,47 @@ def _start_ssh_tunnel(
             "pw CLI not found. Install it from https://parallelworks.com/docs/cli/pw"
         )
 
-    cmd = [
-        "ssh",
-        "-L", f"{local_port}:localhost:{remote_port}",
-        "-o", "ProxyCommand=pw ssh --proxy-command %h",
-        "-N",  # Don't execute remote command
-        f"{user}@workspace",
-    ]
+    # Build the SSH command as a shell string
+    # Using shell=True ensures the pw CLI gets the proper shell environment
+    cmd_str = (
+        f'ssh -i ~/.ssh/pwcli '
+        f'-L {local_port}:localhost:{remote_port} '
+        f'-o "ProxyCommand=pw ssh --proxy-command %h" '
+        f'-o StrictHostKeyChecking=no '
+        f'-o UserKnownHostsFile=/dev/null '
+        f'-N {user}@workspace'
+    )
 
-    # Start tunnel in background
+    # Set up environment with PW_PLATFORM_HOST extracted from API key
+    env = os.environ.copy()
+    api_key = env.get("PW_API_KEY", "")
+    if api_key:
+        try:
+            platform_host = extract_platform_host(api_key)
+            env["PW_PLATFORM_HOST"] = platform_host
+            if debug:
+                console.print(f"[dim]Extracted platform host: {platform_host}[/dim]")
+        except Exception as e:
+            if debug:
+                console.print(f"[yellow]Warning: Could not extract host from API key: {e}[/yellow]")
+
+    if debug:
+        console.print(f"[dim]Running: {cmd_str}[/dim]")
+        if api_key:
+            console.print(f"[dim]PW_API_KEY is set (length: {len(api_key)})[/dim]")
+        else:
+            console.print("[yellow]Warning: PW_API_KEY is not set[/yellow]")
+
+    # Start tunnel using shell=True with bash and pass environment with PW_PLATFORM_HOST
+    # Use start_new_session=True to create a new process group for clean termination
     process = subprocess.Popen(
-        cmd,
+        cmd_str,
+        shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        executable="/bin/bash",
+        env=env,
+        start_new_session=True,
     )
 
     return process
@@ -159,6 +191,13 @@ def list_workflows(as_json: bool):
     default=None,
     help="Local port for SSH tunnel (default: auto-detect from session)",
 )
+@click.option(
+    "--cancel-after",
+    type=int,
+    default=None,
+    help="Automatically cancel the workflow after N seconds (useful for testing)",
+)
+@click.option("--debug", is_flag=True, help="Show debug info (SSH commands, etc.)")
 def run_workflow(
     workflow_name: str,
     input_file: Optional[str],
@@ -169,6 +208,8 @@ def run_workflow(
     as_json: bool,
     tunnel: bool,
     local_port: Optional[int],
+    cancel_after: Optional[int],
+    debug: bool,
 ):
     """Run a workflow with inputs.
 
@@ -255,7 +296,15 @@ def run_workflow(
 
             # Start tunnel if requested and session is ready
             if tunnel and result.success and wf_type == WorkflowType.SESSION and session_port:
-                _run_tunnel(user, tunnel_port, session_port)
+                _run_tunnel(user, tunnel_port, session_port, cancel_after, client, workflow_name, result.run_number, debug)
+            elif cancel_after and result.success:
+                # No tunnel, but cancel-after requested - wait and then cancel
+                console.print(f"\n[yellow]Will cancel workflow in {cancel_after} seconds...[/yellow]")
+                import time
+                time.sleep(cancel_after)
+                console.print(f"\n[yellow]Cancelling workflow {workflow_name} run #{result.run_number}...[/yellow]")
+                client.cancel_run(workflow_name, result.run_number)
+                console.print("[green]Workflow cancelled.[/green]")
 
             sys.exit(0 if result.success else 1)
 
@@ -274,8 +323,12 @@ def run_workflow(
 @click.argument("workflow_name")
 @click.argument("run_number", type=int)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def check_status(workflow_name: str, run_number: int, as_json: bool):
-    """Check the status of a workflow run.
+@click.option("--debug", is_flag=True, help="Show debug info about session matching")
+def check_status(workflow_name: str, run_number: int, as_json: bool, debug: bool):
+    """Check the status of a session workflow run.
+
+    Note: This command queries the /api/sessions endpoint to find the session
+    associated with the workflow run. It only works for session workflows.
 
     Example:
 
@@ -283,18 +336,52 @@ def check_status(workflow_name: str, run_number: int, as_json: bool):
     """
     try:
         with PWClient() as client:
-            run_info = client.get_run_status(workflow_name, run_number)
+            # Use sessions endpoint to find the session for this run
+            session_info = client.get_session_for_run(workflow_name, run_number, debug=debug)
+
+            if session_info is None:
+                print_error(f"No session found for {workflow_name} run #{run_number}")
+                sys.exit(1)
 
             if as_json:
-                click.echo(json.dumps(run_info.model_dump(by_alias=True), indent=2, default=str))
+                click.echo(json.dumps(session_info.model_dump(by_alias=True), indent=2, default=str))
                 return
 
-            console.print(f"Workflow: [cyan]{run_info.workflow_name}[/cyan]")
-            console.print(f"Run: #{run_info.number}")
-            console.print(f"Status: [{'green' if run_info.status.lower() == 'completed' else 'yellow'}]{run_info.status}[/]")
-            console.print(f"Created: {run_info.created_at}")
-            if run_info.completed_at:
-                console.print(f"Completed: {run_info.completed_at}")
+            # Show comprehensive status information
+            status = session_info.status or "unknown"
+            status_color = "green" if status.lower() == "running" else "yellow"
+
+            console.print(f"\n[bold]Workflow Run Status[/bold]")
+            console.print(f"  Workflow:    [cyan]{workflow_name}[/cyan]")
+            console.print(f"  Run:         #{run_number}")
+            console.print(f"  Status:      [{status_color}]{status}[/{status_color}]")
+
+            console.print(f"\n[bold]Session Details[/bold]")
+            console.print(f"  Session ID:  {session_info.id}")
+            if session_info.name:
+                console.print(f"  Name:        {session_info.name}")
+            if session_info.slug:
+                console.print(f"  Slug:        {session_info.slug}")
+            if session_info.type:
+                console.print(f"  Type:        {session_info.type}")
+            if session_info.user:
+                console.print(f"  User:        {session_info.user}")
+
+            console.print(f"\n[bold]Connection Info[/bold]")
+            if session_info.external_href:
+                console.print(f"  URL:         {session_info.external_href}")
+            if session_info.url:
+                console.print(f"  Internal:    {session_info.url}")
+            if session_info.domain_name:
+                console.print(f"  Domain:      {session_info.domain_name}")
+            if session_info.remote_host:
+                console.print(f"  Remote Host: {session_info.remote_host}")
+            if session_info.remote_port:
+                console.print(f"  Remote Port: {session_info.remote_port}")
+            if session_info.local_port:
+                console.print(f"  Local Port:  {session_info.local_port}")
+
+            console.print()
 
     except PWClientError as e:
         print_error(str(e))
@@ -353,13 +440,27 @@ def _print_result(
         console.print(f"  Duration: {result.duration_seconds:.1f}s")
 
 
-def _run_tunnel(user: str, local_port: int, remote_port: int):
-    """Run SSH tunnel and wait for user interrupt.
+def _run_tunnel(
+    user: str,
+    local_port: int,
+    remote_port: int,
+    cancel_after: Optional[int] = None,
+    client: Optional["PWClient"] = None,
+    workflow_name: Optional[str] = None,
+    run_number: Optional[int] = None,
+    debug: bool = False,
+):
+    """Run SSH tunnel and wait for user interrupt or cancel timeout.
 
     Args:
         user: PW username for SSH connection.
         local_port: Local port to forward.
         remote_port: Remote port on the workspace.
+        cancel_after: If set, cancel the workflow after this many seconds.
+        client: PWClient instance (required if cancel_after is set).
+        workflow_name: Workflow name (required if cancel_after is set).
+        run_number: Run number (required if cancel_after is set).
+        debug: If True, print debug info.
     """
     console.print()
     console.print("[cyan]Starting SSH tunnel...[/cyan]")
@@ -367,7 +468,7 @@ def _run_tunnel(user: str, local_port: int, remote_port: int):
     console.print()
 
     try:
-        tunnel_process = _start_ssh_tunnel(user, local_port, remote_port)
+        tunnel_process = _start_ssh_tunnel(user, local_port, remote_port, debug=debug)
 
         # Give it a moment to connect
         import time
@@ -383,20 +484,59 @@ def _run_tunnel(user: str, local_port: int, remote_port: int):
         console.print("[green]Tunnel established![/green]")
         console.print(f"  Access your session at: [link=http://localhost:{local_port}]http://localhost:{local_port}[/link]")
         console.print()
-        console.print("[dim]Press Ctrl+C to close the tunnel and exit[/dim]")
+
+        if cancel_after:
+            console.print(f"[yellow]Will cancel workflow in {cancel_after} seconds...[/yellow]")
+        else:
+            console.print("[dim]Press Ctrl+C to close the tunnel and exit[/dim]")
+
+        # Handle cleanup
+        def cleanup(cancel_workflow: bool = False):
+            console.print("\n[yellow]Closing tunnel...[/yellow]")
+            # Kill the entire process group (needed when shell=True)
+            try:
+                pgid = os.getpgid(tunnel_process.pid)
+                os.killpg(pgid, signal.SIGTERM)
+            except (ProcessLookupError, OSError):
+                # Process already dead
+                pass
+            try:
+                tunnel_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # Force kill if it doesn't respond
+                try:
+                    os.killpg(os.getpgid(tunnel_process.pid), signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+            console.print("[green]Tunnel closed.[/green]")
+
+            if cancel_workflow and client and workflow_name and run_number:
+                console.print(f"[yellow]Cancelling workflow {workflow_name} run #{run_number}...[/yellow]")
+                try:
+                    client.cancel_run(workflow_name, run_number)
+                    console.print("[green]Workflow cancelled.[/green]")
+                except Exception as e:
+                    print_error(f"Failed to cancel workflow: {e}")
 
         # Wait for the tunnel process or user interrupt
         def handle_sigint(signum, frame):
-            console.print("\n[yellow]Closing tunnel...[/yellow]")
-            tunnel_process.terminate()
-            tunnel_process.wait()
-            console.print("[green]Tunnel closed.[/green]")
+            cleanup(cancel_workflow=False)
             sys.exit(0)
 
         signal.signal(signal.SIGINT, handle_sigint)
 
-        # Keep the main process alive while tunnel runs
-        tunnel_process.wait()
+        if cancel_after:
+            # Wait for cancel_after seconds, then cancel
+            start_time = time.time()
+            while time.time() - start_time < cancel_after:
+                if tunnel_process.poll() is not None:
+                    # Tunnel died
+                    break
+                time.sleep(1)
+            cleanup(cancel_workflow=True)
+        else:
+            # Keep the main process alive while tunnel runs
+            tunnel_process.wait()
 
     except RuntimeError as e:
         print_error(str(e))
