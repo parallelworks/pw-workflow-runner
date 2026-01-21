@@ -5,7 +5,7 @@ from typing import Optional
 
 from parallelworks_client import Client
 
-from .models import RunInfo, SubmitResponse, WorkflowInfo
+from .models import RunInfo, SessionInfo, SubmitResponse, WorkflowInfo
 
 
 class PWClientError(Exception):
@@ -95,3 +95,36 @@ class PWClient:
         response = self._sync_client.get(f"/api/workflows/{workflow_name}/runs/{run_number}")
         response.raise_for_status()
         return RunInfo.model_validate(response.json())
+
+    def get_sessions(self) -> list[SessionInfo]:
+        """Get all active sessions.
+
+        Returns:
+            List of SessionInfo objects.
+        """
+        response = self._sync_client.get("/api/sessions")
+        response.raise_for_status()
+        data = response.json()
+        return [SessionInfo.model_validate(s) for s in data]
+
+    def get_session_for_run(
+        self, workflow_name: str, run_number: int
+    ) -> Optional[SessionInfo]:
+        """Find the session associated with a workflow run.
+
+        Args:
+            workflow_name: Name of the workflow.
+            run_number: Run number to find session for.
+
+        Returns:
+            SessionInfo if found, None otherwise.
+        """
+        sessions = self.get_sessions()
+        for session in sessions:
+            if (
+                session.workflow_run
+                and session.workflow_run.workflow_name == workflow_name
+                and session.workflow_run.number == run_number
+            ):
+                return session
+        return None
